@@ -43,19 +43,55 @@ func doRequest(method, path string, body io.Reader) ([]byte, error) {
 }
 
 func searchItems(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	search := request.GetString("search", "")
-	viewMode := request.GetString("view_mode", "all")
-	warehouseID := request.GetString("warehouse_id", "")
+	searchFor := request.GetString("search", "")
+	category := request.GetString("category", "")
+	active := request.GetString("active", "")
 
 	params := url.Values{}
-	params.Set("search", search)
-	params.Set("view_mode", viewMode)
-	params.Set("include_sellable", "true")
-	if warehouseID != "" {
-		params.Set("warehouse_id", warehouseID)
+	if searchFor != "" {
+		params.Set("searchFor", searchFor)
 	}
+	if category != "" {
+		params.Set("category", category)
+	}
+	if active != "" {
+		params.Set("active", active)
+	}
+	params.Set("perPage", "100")
 
 	data, err := doRequest("GET", "/items?"+params.Encode(), nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func getStockLevels(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	searchFor := request.GetString("search", "")
+	warehouseID := request.GetString("warehouse_id", "")
+	warehouseName := request.GetString("warehouse_name", "")
+	inStock := request.GetString("in_stock", "")
+	category := request.GetString("category", "")
+
+	params := url.Values{}
+	if searchFor != "" {
+		params.Set("searchFor", searchFor)
+	}
+	if warehouseID != "" {
+		params.Set("warehouseId", warehouseID)
+	}
+	if warehouseName != "" {
+		params.Set("warehouseName", warehouseName)
+	}
+	if inStock != "" {
+		params.Set("inStock", inStock)
+	}
+	if category != "" {
+		params.Set("category", category)
+	}
+	params.Set("perPage", "100")
+
+	data, err := doRequest("GET", "/inventory?"+params.Encode(), nil)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -87,6 +123,52 @@ func getOrder(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResu
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+func listPurchaseOrders(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	params := url.Values{}
+	for _, p := range []string{"orderNumber", "warehouseId", "warehouseName", "supplierId", "supplierName", "clientId", "clientName"} {
+		snake := camelToSnake(p)
+		if v := request.GetString(snake, ""); v != "" {
+			params.Set(p, v)
+		}
+	}
+	for _, flag := range []string{"open", "completed", "draft", "deleted"} {
+		if v := request.GetString(flag, ""); v != "" {
+			params.Set(flag, v)
+		}
+	}
+	params.Set("perPage", "100")
+
+	data, err := doRequest("GET", "/purchase-orders?"+params.Encode(), nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func getPurchaseOrder(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := request.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	data, err := doRequest("GET", "/purchase-orders/"+id, nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// camelToSnake converts camelCase to snake_case for param lookup.
+func camelToSnake(s string) string {
+	var result strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' && i > 0 {
+			result.WriteByte('_')
+		}
+		result.WriteRune(r | 0x20) // to lower
+	}
+	return result.String()
 }
 
 func createOrder(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -185,12 +267,48 @@ func main() {
 
 	s.AddTool(
 		mcp.NewTool("search_items",
-			mcp.WithDescription("Search Zenventory items/inventory by SKU or description. Returns item details including id, sku, description, stock levels, and pricing."),
-			mcp.WithString("search", mcp.Description("Search term — matches SKUs and descriptions"), mcp.Required()),
-			mcp.WithString("view_mode", mcp.Description("'all' or 'instock' (default: all)")),
-			mcp.WithString("warehouse_id", mcp.Description("Warehouse ID to filter by, or -1 for all")),
+			mcp.WithDescription("Search Zenventory items by SKU, UPC, or description. Returns item details including id, sku, description, and pricing. Use get_stock_levels to get inventory quantities."),
+			mcp.WithString("search", mcp.Description("Search term — matches SKU, UPC, and description (partial matches supported)")),
+			mcp.WithString("category", mcp.Description("Filter by item category")),
+			mcp.WithString("active", mcp.Description("'true' for active items (default), 'false' for inactive")),
 		),
 		searchItems,
+	)
+
+	s.AddTool(
+		mcp.NewTool("get_stock_levels",
+			mcp.WithDescription("Get inventory stock levels for items. Returns quantities on hand, allocated, and available per item per warehouse/location. Use search to filter by SKU or description."),
+			mcp.WithString("search", mcp.Description("Search term — matches SKU, UPC, and description")),
+			mcp.WithString("warehouse_id", mcp.Description("Filter by warehouse ID")),
+			mcp.WithString("warehouse_name", mcp.Description("Filter by warehouse name (ignored if warehouse_id is set)")),
+			mcp.WithString("in_stock", mcp.Description("'true' to only return items with stock > 0")),
+			mcp.WithString("category", mcp.Description("Filter by item category")),
+		),
+		getStockLevels,
+	)
+
+	s.AddTool(
+		mcp.NewTool("list_purchase_orders",
+			mcp.WithDescription("List purchase orders. Filter by status, supplier, warehouse, or order number."),
+			mcp.WithString("order_number", mcp.Description("Search by order number (partial match)")),
+			mcp.WithString("supplier_id", mcp.Description("Filter by supplier ID")),
+			mcp.WithString("supplier_name", mcp.Description("Filter by supplier name (ignored if supplier_id set)")),
+			mcp.WithString("warehouse_id", mcp.Description("Filter by warehouse ID")),
+			mcp.WithString("warehouse_name", mcp.Description("Filter by warehouse name (ignored if warehouse_id set)")),
+			mcp.WithString("open", mcp.Description("'true' to filter for open purchase orders")),
+			mcp.WithString("completed", mcp.Description("'true' to filter for completed purchase orders")),
+			mcp.WithString("draft", mcp.Description("'true' to filter for draft purchase orders")),
+			mcp.WithString("deleted", mcp.Description("'true' to include deleted purchase orders")),
+		),
+		listPurchaseOrders,
+	)
+
+	s.AddTool(
+		mcp.NewTool("get_purchase_order",
+			mcp.WithDescription("Get a single purchase order by ID, including all line items."),
+			mcp.WithString("id", mcp.Description("Purchase order ID"), mcp.Required()),
+		),
+		getPurchaseOrder,
 	)
 
 	s.AddTool(
